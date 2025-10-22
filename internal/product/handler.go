@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"sewascaf.com/api/internal/models"
 
@@ -104,7 +105,7 @@ func (h *Handler) CreateProduct(c *gin.Context) {
 		Name:                c.PostForm("name"),
 		Description:         c.PostForm("description"),
 		PricePerDay:         price,
-		DiscountPricePerDay: discountPrice, // <-- Tambahkan data diskon
+		DiscountPricePerDay: discountPrice,
 		Stock:               stock,
 		ImageURL:            fmt.Sprintf("%s/storage/v1/object/public/product-images/%s", h.SupabaseURL, fileName),
 	}
@@ -299,4 +300,128 @@ func (h *Handler) CreateReview(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{"message": "Review submitted successfully"})
+}
+
+type ProductListResponse struct {
+	ID                  uuid.UUID `json:"id"`
+	Name                string    `json:"name"`
+	PricePerDay         int       `json:"price_per_day"`
+	DiscountPricePerDay int       `json:"discount_price_per_day"`
+	ImageURL            string    `json:"image_url"`
+	ShopName            string    `json:"shop_name"`
+	AverageRating       float64   `json:"average_rating"`
+}
+
+func (h *Handler) GetProducts(c *gin.Context) {
+	// --- Bagian pagination dan search tidak berubah ---
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 { page = 1 }
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "12"))
+	if limit < 1 { limit = 12 }
+	offset := (page - 1) * limit
+	searchQuery := c.Query("search")
+
+	locationFilter := c.Query("location")
+	maxPriceFilter := c.Query("max_price")
+	sortOption := c.Query("sort")
+	startDateStr := c.Query("start_date")
+	endDateStr := c.Query("end_date")
+
+	var response []ProductListResponse
+	
+	// REVISI TOTAL: Query sekarang menggabungkan 3 tabel dan menghitung rata-rata rating
+	query := h.DB.Table("products").
+		Select(`
+			products.id, 
+			products.name, 
+			products.price_per_day, 
+			products.discount_price_per_day, 
+			products.image_url, 
+			shops.shop_name, 
+			COALESCE(AVG(reviews.rating), 0) as average_rating
+		`).
+		Joins("JOIN shops ON shops.id = products.shop_id").
+		Joins("LEFT JOIN reviews ON reviews.product_id = products.id"). // LEFT JOIN agar produk tanpa review tetap muncul
+		Group("products.id, shops.shop_name") // Group by untuk fungsi agregat AVG()
+
+	if searchQuery != "" {
+		query = query.Where("products.name ILIKE ?", "%"+searchQuery+"%")
+	}
+
+	if locationFilter != "" {
+		query = query.Where("shops.shop_address ILIKE ?", "%"+locationFilter+"%")
+	}
+
+	if maxPriceFilter != "" {
+		maxPrice, err := strconv.Atoi(maxPriceFilter)
+		if err == nil && maxPrice > 0 {
+			query = query.Where("products.price_per_day <= ?", maxPrice)
+		}
+	}
+
+	if startDateStr != "" && endDateStr != "" {
+		startDate, err1 := time.Parse("2006-01-02", startDateStr)
+		endDate, err2 := time.Parse("2006-01-02", endDateStr)
+
+		if err1 == nil && err2 == nil {
+			subQuery := h.DB.Model(&models.OrderItem{}).
+				Select("COALESCE(SUM(order_items.quantity), 0)").
+				Joins("JOIN orders ON orders.id = order_items.order_id").
+				Where("order_items.product_id = products.id AND orders.status IN ('active', 'pending') AND (orders.start_date, orders.end_date) OVERLAPS (?, ?)", startDate, endDate)
+
+			query = query.Where("products.stock > (?)", subQuery)
+		}
+	}
+
+	switch sortOption {
+	case "price_asc":
+		query = query.Order("products.price_per_day ASC")
+	case "price_desc":
+		query = query.Order("products.price_per_day DESC")
+	case "rating_desc":
+		query = query.Order("average_rating DESC")
+	}
+
+	if err := query.Offset(offset).Limit(limit).Scan(&response).Error; err != nil {
+		log.Printf("!!! GORM GET PRODUCTS FAILED !!! Error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to retrieve products",
+			"details": err.Error(),
+		})
+		return
+	}
+	
+	if response == nil {
+		response = make([]ProductListResponse, 0)
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+type ProductDetailResponse struct {
+	models.Product        
+	Shop           models.Shop      `json:"shop"`
+	Reviews        []models.Review  `json:"reviews"`
+}
+
+func (h *Handler) GetProductDetail(c *gin.Context) {
+	productID := c.Param("productId")
+
+	var product models.Product
+	// Kita kembali gunakan Preload, karena masalah driver sudah diatasi
+	if err := h.DB.Preload("Shop").Preload("Reviews").First(&product, "id = ?", productID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Product not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve product details", "details": err.Error()})
+		return
+	}
+
+	// Pastikan reviews adalah array kosong, bukan null, jika tidak ada ulasan
+	if product.Reviews == nil {
+		product.Reviews = make([]models.Review, 0)
+	}
+
+	c.JSON(http.StatusOK, product)
 }

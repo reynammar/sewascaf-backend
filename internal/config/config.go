@@ -12,6 +12,10 @@ type Config struct {
 	JWTSecret   string
 	SupabaseURL         string 
 	SupabaseServiceKey  string 
+	TripayAPIKey        string 
+	TripayPrivateKey    string 
+	TripayMerchantCode  string
+	GeminiAPIKey        string
 }
 
 func LoadConfig() (*Config, error) {
@@ -38,12 +42,30 @@ func LoadConfig() (*Config, error) {
 	if supabaseServiceKey == "" {
 		log.Fatal("Error: SUPABASE_SERVICE_KEY is not set")
 	}
+	tripayAPIKey := os.Getenv("TRIPAY_API_KEY")
+	if tripayAPIKey == "" {
+		log.Fatal("Error: TRIPAY_API_KEY is not set")
+	}
+	tripayPrivateKey := os.Getenv("TRIPAY_PRIVATE_KEY")
+	if tripayPrivateKey == "" {
+		log.Fatal("Error: TRIPAY_PRIVATE_KEY is not set")
+	}
+	tripayMerchantCode := os.Getenv("TRIPAY_MERCHANT_CODE")
+	if tripayMerchantCode == "" {
+		log.Fatal("Error: TRIPAY_MERCHANT_CODE is not set")
+	}
+	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
+	if geminiAPIKey == "" { log.Fatal("Error: GEMINI_API_KEY is not set") }
 
 	return &Config{
 		DatabaseURL: dbURL,
 		JWTSecret:          jwtSecret,
 		SupabaseURL:        supabaseURL,        
 		SupabaseServiceKey: supabaseServiceKey,
+		TripayAPIKey:       tripayAPIKey,       
+		TripayPrivateKey:   tripayPrivateKey,   
+		TripayMerchantCode: tripayMerchantCode,
+		GeminiAPIKey:       geminiAPIKey,
 	}, nil
 
 	

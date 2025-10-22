@@ -1,6 +1,10 @@
+// Lokasi: internal/shop/handler.go
+
 package shop
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -18,6 +22,57 @@ func NewHandler(db *gorm.DB) *Handler {
 	return &Handler{DB: db}
 }
 
+// GetShopPaymentChannels menampilkan metode pembayaran yang sudah dipilih oleh vendor
+func (h *Handler) GetShopPaymentChannels(c *gin.Context) {
+	userIDInterface, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
+		return
+	}
+	userIDString, ok := userIDInterface.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+
+	var shop models.Shop
+	// Kita hanya butuh satu kolom, jadi kita pakai .Select() agar lebih efisien
+	if err := h.DB.Select("active_payment_channels").Where("user_id = ?", userIDString).First(&shop).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Shop not found"})
+		return
+	}
+
+	// Jika vendor belum memilih channel (nilainya null), kembalikan array kosong
+	if shop.ActivePaymentChannels == nil {
+		c.JSON(http.StatusOK, make([]string, 0))
+		return
+	}
+
+	c.JSON(http.StatusOK, shop.ActivePaymentChannels)
+}
+
+
+func (h *Handler) GetShopProfile(c *gin.Context) {
+	userIDInterface, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in token"})
+		return
+	}
+	userIDString, ok := userIDInterface.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format in context"})
+		return
+	}
+
+	var shop models.Shop
+	if err := h.DB.Where("user_id = ?", userIDString).First(&shop).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Shop profile not found for this user"})
+		return
+	}
+
+	c.JSON(http.StatusOK, shop)
+}
+
 type UpdateShopPayload struct {
 	ShopName        string `json:"shop_name"`
 	ShopAddress     string `json:"shop_address"`
@@ -25,9 +80,14 @@ type UpdateShopPayload struct {
 }
 
 func (h *Handler) UpdateShopProfile(c *gin.Context) {
-	userID, exists := c.Get("userID")
+	userIDInterface, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in token"})
+		return
+	}
+	userIDString, ok := userIDInterface.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format in context"})
 		return
 	}
 
@@ -38,13 +98,13 @@ func (h *Handler) UpdateShopProfile(c *gin.Context) {
 	}
 
 	var shop models.Shop
-	if err := h.DB.Where("user_id = ?", userID).First(&shop).Error; err != nil {
+	if err := h.DB.Where("user_id = ?", userIDString).First(&shop).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Shop profile not found for this user"})
 		return
 	}
 
 	updates := make(map[string]interface{})
-	
+
 	if payload.ShopName != "" && payload.ShopName != shop.ShopName {
 		if shop.ShopNameLastUpdated != nil {
 			thirtyDays := 30 * 24 * time.Hour
@@ -64,7 +124,7 @@ func (h *Handler) UpdateShopProfile(c *gin.Context) {
 	if payload.ShopDescription != "" {
 		updates["shop_description"] = payload.ShopDescription
 	}
-	
+
 	if len(updates) > 0 {
 		if err := h.DB.Model(&shop).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update shop profile"})
@@ -78,45 +138,33 @@ func (h *Handler) UpdateShopProfile(c *gin.Context) {
 	})
 }
 
-func (h *Handler) GetShopProfile(c *gin.Context) {
-	userID, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in token"})
-		return
-	}
-
-	var shop models.Shop
-	if err := h.DB.Where("user_id = ?", userID).First(&shop).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shop profile not found for this user"})
-		return
-	}
-	c.JSON(http.StatusOK, shop)
-}
-
 type TopProductStat struct {
-	ProductID      string  `json:"product_id"`
-	ProductName    string  `json:"product_name"`
-	Revenue        int     `json:"revenue"`
-	RentalCount    int64   `json:"rental_count"`
-	AverageRating  float64 `json:"average_rating"`
+	ProductID     string  `json:"product_id"`
+	ProductName   string  `json:"product_name"`
+	Revenue       int     `json:"revenue"`
+	RentalCount   int64   `json:"rental_count"`
+	AverageRating float64 `json:"average_rating"`
 }
 
 func (h *Handler) GetShopStatistics(c *gin.Context) {
-	// 1. Dapatkan userID dari token untuk menemukan toko
-	userID, exists := c.Get("userID")
+	userIDInterface, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
 		return
 	}
+	userIDString, ok := userIDInterface.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format in context"})
+		return
+	}
 
 	var shop models.Shop
-	if err := h.DB.Where("user_id = ?", userID).First(&shop).Error; err != nil {
+	if err := h.DB.Where("user_id = ?", userIDString).First(&shop).Error; err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "User does not own a shop"})
 		return
 	}
 
-	// 2. Tentukan rentang waktu berdasarkan query parameter 'period'
-	period := c.DefaultQuery("period", "weekly") // Default ke mingguan jika tidak ada
+	period := c.DefaultQuery("period", "weekly")
 	now := time.Now()
 	var startTime time.Time
 
@@ -137,39 +185,15 @@ func (h *Handler) GetShopStatistics(c *gin.Context) {
 	}
 	endTime := now
 
-	// 3. Hitung statistik utama (Total Pendapatan & Jumlah Order Selesai)
 	var totalRevenue int
 	var completedOrders int64
-	
-	h.DB.Model(&models.Order{}).
-		Where("shop_id = ? AND status = ? AND created_at BETWEEN ? AND ?", shop.ID, "completed", startTime, endTime).
-		Select("COALESCE(SUM(total_price), 0)").
-		Row().
-		Scan(&totalRevenue)
 
-	h.DB.Model(&models.Order{}).
-		Where("shop_id = ? AND status = ? AND created_at BETWEEN ? AND ?", shop.ID, "completed", startTime, endTime).
-		Count(&completedOrders)
+	h.DB.Model(&models.Order{}).Where("shop_id = ? AND status = ? AND created_at BETWEEN ? AND ?", shop.ID, "completed", startTime, endTime).Select("COALESCE(SUM(total_price), 0)").Row().Scan(&totalRevenue)
+	h.DB.Model(&models.Order{}).Where("shop_id = ? AND status = ? AND created_at BETWEEN ? AND ?", shop.ID, "completed", startTime, endTime).Count(&completedOrders)
 
-	// 4. Hitung statistik produk teratas
 	var topProducts []TopProductStat
-	h.DB.Table("products").
-		Select(`
-			products.id as product_id,
-			products.name as product_name,
-			COALESCE(SUM(orders.total_price), 0) as revenue,
-			COUNT(orders.id) as rental_count,
-			COALESCE(AVG(reviews.rating), 0) as average_rating
-		`).
-		Joins("LEFT JOIN orders ON orders.shop_id = products.shop_id AND orders.status = 'completed' AND orders.created_at BETWEEN ? AND ?", startTime, endTime).
-		Joins("LEFT JOIN reviews ON reviews.product_id = products.id").
-		Where("products.shop_id = ?", shop.ID).
-		Group("products.id").
-		Order("revenue DESC").
-		Limit(5). // Ambil 5 produk teratas
-		Scan(&topProducts)
+	h.DB.Table("products").Select(`products.id as product_id, products.name as product_name, COALESCE(SUM(orders.total_price), 0) as revenue, COUNT(orders.id) as rental_count, COALESCE(AVG(reviews.rating), 0) as average_rating`).Joins("LEFT JOIN orders ON orders.shop_id = products.shop_id AND orders.status = 'completed' AND orders.created_at BETWEEN ? AND ?", startTime, endTime).Joins("LEFT JOIN reviews ON reviews.product_id = products.id").Where("products.shop_id = ?", shop.ID).Group("products.id").Order("revenue DESC").Limit(5).Scan(&topProducts)
 
-	// 5. Kirim semua data dalam satu respons JSON
 	c.JSON(http.StatusOK, gin.H{
 		"period":           period,
 		"start_date":       startTime,
@@ -181,39 +205,134 @@ func (h *Handler) GetShopStatistics(c *gin.Context) {
 }
 
 func (h *Handler) GetShopOrders(c *gin.Context) {
-	// 1. Dapatkan userID dari token untuk menemukan toko
-	userID, exists := c.Get("userID")
+	userIDInterface, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
 		return
 	}
+	userIDString, ok := userIDInterface.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format in context"})
+		return
+	}
 
 	var shop models.Shop
-	if err := h.DB.Select("id").Where("user_id = ?", userID).First(&shop).Error; err != nil {
+	if err := h.DB.Select("id").Where("user_id = ?", userIDString).First(&shop).Error; err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "User does not own a shop"})
 		return
 	}
 
-	// 2. Siapkan query untuk mengambil pesanan
 	query := h.DB.Model(&models.Order{}).Where("shop_id = ?", shop.ID)
-
-	// 3. (Opsional) Tambahkan filter berdasarkan status jika ada
 	statusFilter := c.Query("status")
 	if statusFilter != "" {
 		query = query.Where("status = ?", statusFilter)
 	}
 
-	// 4. Ambil semua pesanan yang cocok dan urutkan berdasarkan yang terbaru
 	var orders []models.Order
 	if err := query.Order("created_at DESC").Find(&orders).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve orders"})
 		return
 	}
 
-	// Jika tidak ada pesanan, kembalikan array kosong
 	if orders == nil {
 		orders = make([]models.Order, 0)
 	}
-
 	c.JSON(http.StatusOK, orders)
+}
+
+type UpdateStatusPayload struct {
+	Status string `json:"status" binding:"required"`
+}
+
+func (h *Handler) UpdateOrderStatus(c *gin.Context) {
+	userIDInterface, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
+		return
+	}
+	userIDString, ok := userIDInterface.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format in context"})
+		return
+	}
+	orderID := c.Param("orderId")
+
+	var payload UpdateStatusPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	newStatus := payload.Status
+	allowedStatus := map[string]bool{
+		"pending": true, "active": true, "completed": true, "cancelled": true,
+	}
+	if !allowedStatus[newStatus] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status value"})
+		return
+	}
+
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		var shop models.Shop
+		if err := tx.Select("id").Where("user_id = ?", userIDString).First(&shop).Error; err != nil {
+			return errors.New("shop not found for this user")
+		}
+
+		var order models.Order
+		if err := tx.Where("id = ? AND shop_id = ?", orderID, shop.ID).First(&order).Error; err != nil {
+			return errors.New("order not found or you do not have permission to edit it")
+		}
+
+		if err := tx.Model(&order).Update("status", newStatus).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Order status updated successfully"})
+}
+
+type UpdatePaymentChannelsPayload struct {
+	Channels []string `json:"channels"`
+}
+
+func (h *Handler) UpdatePaymentChannels(c *gin.Context) {
+	userIDInterface, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
+		return
+	}
+	userIDString, ok := userIDInterface.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID format in context"})
+		return
+	}
+
+	var payload UpdatePaymentChannelsPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body, 'channels' must be an array of strings"})
+		return
+	}
+
+	var shop models.Shop
+	if err := h.DB.Where("user_id = ?", userIDString).First(&shop).Error; err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Shop not found for this user"})
+		return
+	}
+
+	jsonData, err := json.Marshal(payload.Channels)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal payment channels to JSON"})
+		return
+	}
+
+	if err := h.DB.Model(&shop).Update("active_payment_channels", jsonData).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update payment channels"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Payment channels updated successfully"})
 }
